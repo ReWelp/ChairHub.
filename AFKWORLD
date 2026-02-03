@@ -1,0 +1,143 @@
+repeat wait() until game.Loaded
+local HttpService      = game:GetService("HttpService")
+local TeleportService  = game:GetService("TeleportService")
+local Players          = game:GetService("Players")
+local StarterGui       = game:GetService("StarterGui")
+local LocalPlayer      = Players.LocalPlayer
+
+--==== CONFIG ====
+local WEBHOOK_URL      = "YOUR_WEBHOOK_URL_HERE" -- Discord webhook here
+local TIMER_THRESHOLD  = 0       -- When timer hits this, claim and hop!
+local TIMER_DELAY      = 0.2     -- Wait this long *at timer 0* to ensure reward
+local HOP_DELAY        = 0.15    -- Delay between hop attempts/checks
+local NOTIFY_TIMER     = 5       -- seconds for roblox notification
+local SERVER_FILE      = "NotSameServers.json"
+--=================
+
+-- Load or initialize server visit log (per hour)
+local PlaceID     = game.PlaceId
+local AllIDs      = {}
+local actualHour  = tostring(math.floor(os.date("!*t").min / 10))
+local foundCursor = ""
+pcall(function()
+    AllIDs = HttpService:JSONDecode(readfile(SERVER_FILE))
+end)
+if not AllIDs[1] then
+    AllIDs = {actualHour}
+    pcall(function()
+        writefile(SERVER_FILE, HttpService:JSONEncode(AllIDs))
+    end)
+end
+
+--== Helper Functions ==--
+local function notify(text)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "ABA AFK Farm",
+            Text = text,
+            Duration = NOTIFY_TIMER
+        })
+    end)
+end
+
+local function sendDiscordNotification(serverId, timer, totalMoney, reason)
+    local embed = {
+        ["embeds"] = {{
+            ["title"]       = "💸 ABA Server Hop",
+            ["description"] = reason or "Reward claimed & server-hopping!",
+            ["color"]       = tonumber(0x77dd77),
+            ["fields"]      = {
+                {["name"]="ServerID",       ["value"]=tostring(serverId), ["inline"]=true },
+                {["name"]="Timer on Hop",   ["value"]=tostring(timer).."s", ["inline"]=true },
+                {["name"]="Total Money",    ["value"]="$"..tostring(totalMoney), ["inline"]=true }
+            },
+            ["footer"]      = { ["text"] = "RZiln + Copilot" },
+            ["timestamp"]   = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        }}
+    }
+    pcall(function()
+        HttpService:PostAsync(WEBHOOK_URL, HttpService:JSONEncode(embed))
+    end)
+end
+
+local function getTimeLeft()
+    local msg = game.Workspace:FindFirstChild("Message")
+    if not msg then return 99 end
+    local n = tonumber(msg.Text:match("(%d+)"))
+    return n or 99
+end
+
+local function getMoney()
+    local stat = LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Money")
+    return stat and tonumber(stat.Value) or 0
+end
+
+local function generateNextServer()
+    local url = 'https://games.roblox.com/v1/games/'..PlaceID..'/servers/Public?sortOrder=Asc&limit=100'
+    if foundCursor ~= "" then
+        url = url.."&cursor="..foundCursor
+    end
+    local raw = game:HttpGet(url)
+    local data = HttpService:JSONDecode(raw)
+    foundCursor = data.nextPageCursor or ""
+    for _, entry in ipairs(data.data) do
+        local id = tostring(entry.id)
+        if tonumber(entry.maxPlayers) > tonumber(entry.playing) then
+            local visited = false
+            for _, v in ipairs(AllIDs) do
+                if id == tostring(v) then
+                    visited = true
+                    break
+                end
+            end
+            if not visited then
+                table.insert(AllIDs, id)
+                pcall(function()
+                    writefile(SERVER_FILE, HttpService:JSONEncode(AllIDs))
+                end)
+                return id
+            end
+        end
+    end
+    return nil
+end
+
+--== Main Loop ==--
+notify("Ultra Fast AFK ServerHop Running")
+local prevMoney = getMoney()
+
+while true do
+    local tLeft = getTimeLeft()
+    local currMoney = getMoney()
+    -- At/below timer threshold, claim, notify, hop!
+    if tLeft <= TIMER_THRESHOLD then
+        task.wait(TIMER_DELAY)  -- Wait a split second at 0 to ensure payout hits!
+        currMoney = getMoney()  -- Refresh cash count
+        local nextServer = generateNextServer()
+        sendDiscordNotification(game.JobId, tLeft, currMoney, "Paid! Hopping now!")
+        notify("Server Hopping for MAX cash!")
+        task.wait(0.1)
+        if nextServer then
+            TeleportService:TeleportToPlaceInstance(PlaceID, nextServer, LocalPlayer)
+        else
+            -- All servers joined, reset for new round
+            notify("No more servers. Resetting log!")
+            AllIDs = {actualHour}
+            pcall(function()
+                writefile(SERVER_FILE, HttpService:JSONEncode(AllIDs))
+            end)
+            foundCursor = ""
+        end
+        prevMoney = currMoney
+    elseif tLeft > TIMER_THRESHOLD + 2 then
+        -- If this is a "bad" (new/high-timer) server, hop to a fresh one instantly
+        local nextServer = generateNextServer()
+        if nextServer then
+            notify("Found a fresher server, hopping!")
+            sendDiscordNotification(game.JobId, tLeft, currMoney, "Bad timer. Hopping for better!")
+            task.wait(0.1)
+            TeleportService:TeleportToPlaceInstance(PlaceID, nextServer, LocalPlayer)
+        end
+    end
+    task.wait(HOP_DELAY)
+end
